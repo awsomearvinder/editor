@@ -482,6 +482,7 @@ dependencies = [
  "async-trait",
  "futures 0.3.5",
  "iced",
+ "iced_futures",
  "iced_native",
  "nvim-rs",
  "rmpv",

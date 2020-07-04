@@ -65,6 +65,13 @@ impl TextView {
                 self.bridge.change_resolution(width, height),
                 self.bridge.open_file(std::path::PathBuf::from("~/test")),
             ]),
+            Msg::IcedEvent(iced_native::Event::Keyboard(event)) => match event {
+                iced_native::input::keyboard::Event::CharacterReceived(c) => {
+                    eprintln!("sending {}", c);
+                    self.bridge.send_input(c)
+                }
+                _ => iced::Command::none(),
+            },
             Msg::BufUpdate(_) => {
                 eprintln!("Got a buf update! YES!");
                 iced::Command::none()
@@ -116,6 +123,7 @@ pub enum Msg {
     AttachedUI(()),
     GotBridge(crate::bridge::Bridge),
     OpenedFile(()),
+    SentInput(()),
 }
 
 pub struct NvimUpdateHandler(

@@ -5,27 +5,36 @@
  * so it can be displayed to the user instead.
  */
 
-use nvim_rs::create::tokio as create;
-use std::convert::TryFrom;
+use crate::ui::Msg;
+use futures::executor;
+use nvim_rs::{compat::tokio::Compat, create::tokio as create, neovim::Neovim};
+use std::{
+    convert::TryFrom,
+    fmt::{Debug, Formatter},
+    sync::Arc,
+};
+use tokio::{
+    process::ChildStdin,
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+};
 
 mod character;
 mod errors;
 mod grid_line;
 
-type MyNeovim = nvim_rs::neovim::Neovim<nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>>;
+type MyNeovim = Neovim<Compat<ChildStdin>>;
 
 //TODO: make this configurable
 const FONTSIZE: u32 = 16;
 
 pub struct Bridge {
-    nvim_session: std::sync::Arc<async_mutex::Mutex<MyNeovim>>,
+    nvim_session: Arc<async_mutex::Mutex<MyNeovim>>,
     already_attached_ui: bool,
-    pub rx:
-        std::sync::Arc<async_mutex::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::ui::Msg>>>,
+    pub rx: Arc<async_mutex::Mutex<UnboundedReceiver<Msg>>>,
 }
 
-impl std::fmt::Debug for Bridge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Bridge {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Bridge")
     }
 }
@@ -36,15 +45,15 @@ impl Bridge {
     //It's blocking on it's futures. Yes. I know. It's bad. It's inefficient.
     //It only runs once. I don't give  a shit.
     pub fn new() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let neovim = std::sync::Arc::new(async_mutex::Mutex::new(
-            futures::executor::block_on(async {
-                create::new_child(Handler(std::sync::Arc::new(std::sync::Mutex::new(tx)))).await
+        let (tx, rx) = mpsc::unbounded_channel();
+        let neovim = Arc::new(async_mutex::Mutex::new(
+            executor::block_on(async {
+                create::new_child(Handler(Arc::new(async_mutex::Mutex::new(tx)))).await
             })
             .unwrap()
             .0,
         ));
-        futures::executor::block_on(async { neovim.lock().await.subscribe("buf").await }).unwrap();
+        executor::block_on(async { neovim.lock().await.subscribe("buf").await }).unwrap();
         Self {
             nvim_session: neovim,
             already_attached_ui: false,
@@ -53,9 +62,22 @@ impl Bridge {
     }
 
     ///Changes the resolution reported to neovim - this is a requirement.
-    pub fn change_resolution(&mut self, width: u32, height: u32) -> iced::Command<crate::ui::Msg> {
+    pub fn change_resolution(&mut self, width: u32, height: u32) -> iced::Command<Msg> {
         let nvim_session = self.nvim_session.clone();
-        if !self.already_attached_ui {
+
+        if self.already_attached_ui {
+            iced::Command::perform(
+                async move {
+                    nvim_session
+                        .lock()
+                        .await
+                        .ui_try_resize(width as i64, height as i64)
+                        .await
+                        .unwrap_or_else(|e| panic!("failed to resize UI, debug: {}", e));
+                },
+                Msg::UpdatedResolution,
+            )
+        } else {
             self.already_attached_ui = true;
             iced::Command::perform(
                 async move {
@@ -70,23 +92,12 @@ impl Bridge {
                         .await
                         .unwrap_or_else(|e| panic!("Could not attach UI, debug: {}", e));
                 },
-                crate::ui::Msg::AttachedUI,
-            )
-        } else {
-            iced::Command::perform(
-                async move {
-                    nvim_session
-                        .lock()
-                        .await
-                        .ui_try_resize(width as i64, height as i64)
-                        .await
-                        .unwrap_or_else(|e| panic!("failed to resize UI, debug: {}", e));
-                },
-                crate::ui::Msg::UpdatedResolution,
+                Msg::AttachedUI,
             )
         }
     }
-    pub fn open_file(&self, file: std::path::PathBuf) -> iced::Command<crate::ui::Msg> {
+
+    pub fn open_file(&self, file: std::path::PathBuf) -> iced::Command<Msg> {
         let nvim_session = self.nvim_session.clone();
         iced::Command::perform(
             async move {
@@ -97,10 +108,11 @@ impl Bridge {
                     .await
                     .unwrap();
             },
-            crate::ui::Msg::OpenedFile,
+            Msg::OpenedFile,
         )
     }
-    pub fn send_input(&self, c: char) -> iced::Command<crate::ui::Msg> {
+
+    pub fn send_input(&self, c: char) -> iced::Command<Msg> {
         let nvim_session = self.nvim_session.clone();
         iced::Command::perform(
             async move {
@@ -111,18 +123,17 @@ impl Bridge {
                     .await
                     .unwrap();
             },
-            crate::ui::Msg::SentInput,
+            Msg::SentInput,
         )
     }
 }
 
 #[derive(Clone)]
-struct Handler(
-    std::sync::Arc<std::sync::Mutex<tokio::sync::mpsc::UnboundedSender<crate::ui::Msg>>>,
-);
+struct Handler(Arc<async_mutex::Mutex<UnboundedSender<Msg>>>);
 #[async_trait::async_trait]
 impl nvim_rs::Handler for Handler {
-    type Writer = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+    type Writer = Compat<ChildStdin>;
+
     async fn handle_request(
         &self,
         _name: String,
@@ -136,7 +147,8 @@ impl nvim_rs::Handler for Handler {
     }
 
     async fn handle_notify(&self, _name: String, args: Vec<rmpv::Value>, _neovim: MyNeovim) {
-        let channel = self.0.lock().unwrap();
+        //TODO: Need to figure out how message sending works. T is an enum we send?
+        let _channel = self.0.lock().await;
         for arg in args {
             if !arg.is_array() {
                 break;
@@ -148,7 +160,7 @@ impl nvim_rs::Handler for Handler {
             if arr[0].is_str() {
                 let name_of_arr = arr[0].as_str();
                 if name_of_arr.unwrap() == "grid_line" {
-                    let grid_line = grid_line::GridLine::try_from(&arr[1]).unwrap();
+                    let _grid_line = grid_line::GridLine::try_from(&arr[1]).unwrap();
                 }
             }
         }

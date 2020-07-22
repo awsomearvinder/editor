@@ -25,6 +25,7 @@ impl std::convert::TryFrom<&rmpv::Value> for Character {
 }
 
 impl Character {
+    #[allow(dead_code)]
     pub fn new(utf8_char: String, highlight_id: i64, repeat: i64) -> Self {
         Self {
             utf8_char,

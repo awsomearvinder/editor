@@ -130,13 +130,13 @@ impl Bridge {
 ///and handle_notify in nvim_rs::Handler for more information.
 #[derive(Clone)]
 struct Handler {
-    sender_channel: Arc<Mutex<UnboundedSender<Msg>>>,
+    sender_channel: UnboundedSender<Msg>,
 }
 
 impl Handler {
     fn new(sender: UnboundedSender<Msg>) -> Self {
         Self {
-            sender_channel: Arc::new(Mutex::new(sender)),
+            sender_channel: sender,
         }
     }
 }
@@ -159,7 +159,7 @@ impl nvim_rs::Handler for Handler {
 
     async fn handle_notify(&self, _name: String, args: Vec<rmpv::Value>, _neovim: MyNeovim) {
         //TODO: Need to figure out how message sending works. T is an enum we send?
-        let _channel = self.sender_channel.lock().await;
+        let _channel = &self.sender_channel;
         for arg in args {
             if !arg.is_array() {
                 break;
